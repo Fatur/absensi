@@ -11,18 +11,20 @@ import (
 
 	"github.com/go-martini/martini"
 	"github.com/martini-contrib/render"
+	"appengine"
+	"appengine/datastore"
 )
 
 type Payload struct {
 	Data []Event
 }
 
-var inMemoryData Payload
-var attandances map[AttandanceId]Attandance
 var uploadFileCsv = func(render render.Render, log *log.Logger) {
 	render.HTML(200, "uploadCsv", nil)
 }
 var uploadFileCsvHandler = func(w http.ResponseWriter, r *http.Request) (int, string) {
+	c := appengine.NewContext(r)
+
 	log.Println("parsing form")
 	err := r.ParseMultipartForm(100000)
 	if err != nil {
@@ -33,74 +35,145 @@ var uploadFileCsvHandler = func(w http.ResponseWriter, r *http.Request) (int, st
 	for i, _ := range files {
 		log.Println("getting handle to file")
 
-		file, err := files[i].Open()
+		file, errOpenFile := files[i].Open()
 		defer file.Close()
-		if err != nil {
-			return http.StatusInternalServerError, err.Error()
+		if errOpenFile != nil {
+			return http.StatusInternalServerError, errOpenFile.Error()
 		}
 
 		reader := csv.NewReader(file)
 		reader.FieldsPerRecord = -1
 
-		rawCsvdata, err := reader.ReadAll()
-		if err != nil {
-			return http.StatusInternalServerError, err.Error()
+		rawCsvdata, errReadFile := reader.ReadAll()
+		if errReadFile != nil {
+			return http.StatusInternalServerError, errReadFile.Error()
 		}
 
 		for _, each := range rawCsvdata {
 			log.Printf("Id : %s and Location : %s  Time : %s  Type : %s\n", each[0], each[1], each[2], each[3])
-			t, err1 := time.Parse(time.RFC3339Nano, each[2])
-			if err1 != nil {
-				return http.StatusInternalServerError, err.Error()
+			t, parseTimeError := time.Parse(time.RFC3339Nano, each[2])
+			if parseTimeError != nil {
+				return http.StatusInternalServerError, parseTimeError.Error()
 			}
-			tipe, err2 := strconv.ParseInt(each[3], 0, 16)
-			if err2 != nil {
-				return http.StatusInternalServerError, err.Error()
+			tipe, parseTypeError := strconv.ParseInt(each[3], 0, 16)
+			if parseTypeError != nil {
+				return http.StatusInternalServerError, parseTypeError.Error()
 			}
 			evt := Event{each[0], each[1], t, EventType(tipe)}
-			_, err3 := inMemoryData.Add(evt)
-			if err3 != nil {
-				return http.StatusInternalServerError, err.Error()
+			_, saveEvtError := saveEvent(c, evt)
+			if saveEvtError != nil {
+				return http.StatusInternalServerError, saveEvtError.Error()
 			}
-			calculateAttandance(evt)
+			errAttd := calculateAttandance(c, evt)
+			if errAttd != nil {
+				return http.StatusInternalServerError, errAttd.Error()
+			}
 		}
 	}
 
 	return 200, "ok"
 
 }
-var getAllAttandance = func() string {
-	arrAtd := convertAttandanceToArray()
-	response, err := json.MarshalIndent(arrAtd, "", " ")
-	if err != nil {
-		panic(err)
-	}
-	return string(response)
+
+func saveEvent(context appengine.Context, evt Event) (*datastore.Key, error) {
+	key := datastore.NewIncompleteKey(context, "Event", nil)
+	return datastore.Put(context, key, &evt)
 }
-var getAllItem = func() string {
-	return getAll(inMemoryData)
+func calculateAttandance(context appengine.Context, evt Event) error {
+	id := evt.CreateAttandanceId()
+	attd, err := findAttandance(context, id)
+	if err != nil {
+		if err == datastore.ErrNoSuchEntity {
+			attd = evt.CreateAttandance()
+		} else {
+			return err
+		}
+	} else {
+		attd.Calculate(evt)
+	}
+
+	_, errPut := saveAttandance(context, attd)
+
+	return errPut
+}
+func saveAttandance(context appengine.Context, attd Attandance) (*datastore.Key, error) {
+	key := datastore.NewKey(context, "Attandance", attd.Id.ToKey(), 0, nil)
+	return datastore.Put(context, key, &attd)
+
+}
+func findAttandance(context appengine.Context, attandanceId AttandanceId) (Attandance, error) {
+	key := datastore.NewKey(context, "Attandance", attandanceId.ToKey(), 0, nil)
+	var attandance Attandance
+	err := datastore.Get(context, key, &attandance)
+	return attandance, err
+
+}
+
+var getAllAttandance = func(r *http.Request) (int, string) {
+	context := appengine.NewContext(r)
+	atandances, errFind := findAllAttandance(context)
+	if errFind != nil {
+		return http.StatusInternalServerError, errFind.Error()
+	}
+	response, errAttd := json.MarshalIndent(atandances, "", " ")
+	if errAttd != nil {
+		return http.StatusInternalServerError, errAttd.Error()
+	}
+	return 200, string(response)
+}
+
+func findAllAttandance(context appengine.Context) ([]Attandance, error) {
+	q := datastore.NewQuery("Attandance").Order("Id.EmployeeId").Order("Id.Date")
+	var attds []Attandance
+	_, err := q.GetAll(context, &attds)
+
+	return attds, err
+}
+
+var getAllById = func(r *http.Request, params martini.Params) (int, string) {
+	c := appengine.NewContext(r)
+	q := datastore.NewQuery("Event").Filter("Id =", params["id"]).Order("Id").Order("Time")
+	var evts []Event
+	_, err := q.GetAll(c, &evts)
+	if err != nil {
+		return http.StatusInternalServerError, err.Error()
+	}
+
+	var inMemoryData Payload
+	inMemoryData.Data = evts
+
+	return 200, getAll(inMemoryData)
+
+}
+var getAllItem = func(r *http.Request) (int, string) {
+	c := appengine.NewContext(r)
+	q := datastore.NewQuery("Event").Order("Id").Order("Time")
+	var evts []Event
+	_, err := q.GetAll(c, &evts)
+	if err != nil {
+		return http.StatusInternalServerError, err.Error()
+	}
+	var inMemoryData Payload
+	inMemoryData.Data = evts
+	return 200, getAll(inMemoryData)
 }
 var addNew = func(w http.ResponseWriter, r *http.Request) (int, string) {
 	newEvt := decodeNewRequest(r)
-	id, err := inMemoryData.Add(newEvt)
+	c := appengine.NewContext(r)
+	id, err := saveEvent(c, newEvt)
 	if err != nil {
-		panic(err)
+		return http.StatusInternalServerError, err.Error()
 	}
-	calculateAttandance(newEvt)
-	w.Header().Set("Location", fmt.Sprintf("/%d", id))
+	errAttd := calculateAttandance(c, newEvt)
+	if errAttd != nil {
+		return http.StatusInternalServerError, errAttd.Error()
+	}
+	w.Header().Set("Location", fmt.Sprintf("/%d", id.Encode()))
 	return http.StatusCreated, "OK"
 }
 
-func convertAttandanceToArray() []Attandance {
-	attd := make([]Attandance, 0, len(attandances))
-	for k := range attandances {
-		attd = append(attd, attandances[k])
-	}
-	return attd
-}
 func init() {
-	attandances = make(map[AttandanceId]Attandance)
-	loadDataTo(&inMemoryData)
+
 	m := martini.Classic()
 	m.Use(render.Renderer(render.Options{
 		Directory:  "templates",
@@ -113,7 +186,9 @@ func init() {
 func setupLogs(m *martini.ClassicMartini) {
 	m.Group("/logs", func(r martini.Router) {
 		r.Get("", getAllItem)
+		r.Get("/:id", getAllById)
 		r.Post("", addNew)
+
 	})
 	m.Group("/attandances", func(r martini.Router) {
 		r.Get("", getAllAttandance)
@@ -135,10 +210,7 @@ func (data *Payload) ToJson() string {
 	}
 	return string(response)
 }
-func (repo *Payload) Add(evt Event) (string, error) {
-	repo.Data = append(repo.Data, evt)
-	return evt.Id, nil
-}
+
 func decodeNewRequest(r *http.Request) Event {
 	decoder := json.NewDecoder(r.Body)
 	var evt Event
@@ -147,32 +219,4 @@ func decodeNewRequest(r *http.Request) Event {
 		panic(err)
 	}
 	return evt
-}
-func loadDataTo(repo *Payload) {
-
-	evt1 := Event{"001", "5:6", time.Now(), In}
-	evt2 := Event{"002", "5:7", time.Now(), In}
-	evt3 := Event{"001", "5:7", time.Now().Add(8 * time.Hour), Out}
-
-	repo.Add(evt1)
-	repo.Add(evt2)
-	repo.Add(evt3)
-
-	calculateAttandance(evt1)
-
-	calculateAttandance(evt2)
-
-	calculateAttandance(evt3)
-
-}
-func calculateAttandance(evt Event) {
-	id := evt.CreateAttandanceId()
-
-	attd, ok := attandances[id]
-	if !ok {
-		attandances[id] = evt.CreateAttandance()
-	} else {
-		attd.Calculate(evt)
-		attandances[id] = attd
-	}
 }

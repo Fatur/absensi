@@ -29,3 +29,7 @@ func (atd *Attandance) Calculate(evt Event) {
 		atd.WorkHours = atd.TimeOut.Sub(atd.TimeIn).Hours()
 	}
 }
+func (id *AttandanceId) ToKey() string {
+	tgl := id.Date.Format("2006-01-02")
+	return id.EmployeeId + "_" + tgl
+}
