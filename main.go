@@ -109,6 +109,20 @@ func findAttandance(context appengine.Context, attandanceId AttandanceId) (Attan
 
 }
 
+var addNew = func(w http.ResponseWriter, r *http.Request) (int, string) {
+	newEvt := decodeNewRequest(r)
+	c := appengine.NewContext(r)
+	id, err := saveEvent(c, newEvt)
+	if err != nil {
+		return http.StatusInternalServerError, err.Error()
+	}
+	errAttd := calculateAttandance(c, newEvt)
+	if errAttd != nil {
+		return http.StatusInternalServerError, errAttd.Error()
+	}
+	w.Header().Set("Location", fmt.Sprintf("/%d", id.Encode()))
+	return http.StatusCreated, "OK"
+}
 var getAllAttandance = func(r *http.Request) (int, string) {
 	context := appengine.NewContext(r)
 	atandances, errFind := findAllAttandance(context)
@@ -156,20 +170,6 @@ var getAllItem = func(r *http.Request) (int, string) {
 	var inMemoryData Payload
 	inMemoryData.Data = evts
 	return 200, getAll(inMemoryData)
-}
-var addNew = func(w http.ResponseWriter, r *http.Request) (int, string) {
-	newEvt := decodeNewRequest(r)
-	c := appengine.NewContext(r)
-	id, err := saveEvent(c, newEvt)
-	if err != nil {
-		return http.StatusInternalServerError, err.Error()
-	}
-	errAttd := calculateAttandance(c, newEvt)
-	if errAttd != nil {
-		return http.StatusInternalServerError, errAttd.Error()
-	}
-	w.Header().Set("Location", fmt.Sprintf("/%d", id.Encode()))
-	return http.StatusCreated, "OK"
 }
 
 func init() {
